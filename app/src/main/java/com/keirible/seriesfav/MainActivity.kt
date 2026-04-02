@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.*
 import androidx.appcompat.app.AppCompatActivity
 import com.keirible.seriesfav.R
@@ -24,15 +25,25 @@ class MainActivity : AppCompatActivity() {
     private val APP_URL      = "https://keiriblest.github.io/SeriesFav/mobile.html"
     private val HOME_HOST    = "keiriblest.github.io"
     private var adPatterns: List<String> = emptyList()
+    private val TAG = "AdShield"
 
+    // ── Lista de dominios de ads ──────────────────────────────────────────────
     private val adBlockList = listOf(
-        "exoclick.com","exosrv.com","exdynsrv.com","exospecial.com",
-        "popcash.net","popads.net","popadvert.com","popunder",
+        // PropellerAds — red que usa el sitio del usuario
         "propellerads.com","propellerclick.com","pphventures.com",
+        "a.magsrv.com","magsrv.com",
+        "poweredby.jads.co","jads.co",
+        "continue-download.com",          // ← landing page PropellerAds confirmado
+        "allideasofanime.com",             // ← advertiser PropellerAds confirmado
+        "pushground.com","promordr.com",
+        // ExoClick
+        "exoclick.com","exosrv.com","exdynsrv.com","exospecial.com",
+        // PopAds
+        "popcash.net","popads.net","popadvert.com",
+        // Otros ad-networks de streaming
         "trafficjunky.net","trafficfactory.biz","trafficforce.com",
-        "adsterra.com","adsterratech.com","juicyads.com",
-        "hilltopads.net","hilltopads.com","clickadu.com",
-        "clickaine.com","adnium.com","fuckingfast.co",
+        "adsterra.com","juicyads.com","hilltopads.net","hilltopads.com",
+        "clickadu.com","clickaine.com","adnium.com","fuckingfast.co",
         "ero-advertising.com","tsyndicate.com",
         "doubleclick.net","googlesyndication.com",
         "adservice.google","pagead2.googlesyndication",
@@ -41,21 +52,30 @@ class MainActivity : AppCompatActivity() {
         "pubmatic.com","rubiconproject.com","appnexus.com",
         "criteo.com","criteo.net","bidswitch.net","sovrn.com",
         "adsrvr.org","casalemedia.com","indexexchange.com",
+        // Patrones genéricos
         "/pop.js","/popup.js","/pops.js","/ad.js","/ads.js",
         "/banner.js","/popunder.js","adframe","adserver",
         "pop-ads","pop_ads","popads","poptm"
     )
 
-    // Palabras clave de URLs que son redirecciones de ad
-    private val adRedirectKeywords = listOf(
-        "click.","track.","goto.","redirect.","exit.","refer.",
-        "aff.","redir.","go.php","click.php","out.php",
-        "bounce","adclick","adredirect","adtarget"
+    // ── Parámetros UTM que indican tráfico de PropellerAds / ad-networks ──────
+    private val adUtmPatterns = listOf(
+        "utm_source=pu",          // PropellerAds (pu = PropellerAds)
+        "utm_campaign=pu_",       // PropellerAds campaign
+        "utm_source=propeller",
+        "utm_campaign=propeller",
+        "utm_medium=popunder",
+        "utm_medium=push",
+        "an=pa",                  // PropellerAds 'an' param
+        "crID=",                  // Ad creative ID
+        "zID=",                   // PropellerAds zone ID
+        "cid=106356",             // PropellerAds campaign ID prefix
+        "popunder","pop-under","popads"
     )
 
     private fun readAsset(name: String): String? = try {
         assets.open("adshield/$name").bufferedReader().readText()
-    } catch (e: Exception) { null }
+    } catch (e: Exception) { Log.e(TAG,"readAsset error: $name",e); null }
 
     private fun loadAdPatterns() {
         val json = readAsset("rules.json") ?: return
@@ -66,11 +86,16 @@ class MainActivity : AppCompatActivity() {
                 ?.let { r -> r.removePrefix("||").removeSuffix("^")
                     .replace("*","").trim().takeIf { it.length > 3 } }
         }
+        Log.d(TAG,"Patrones: ${adPatterns.size}")
     }
 
     private fun isAdUrl(url: String): Boolean {
         val l = url.lowercase()
-        return adPatterns.any { l.contains(it) } || adBlockList.any { l.contains(it) }
+        // Dominio conocido de ad
+        if (adPatterns.any { l.contains(it) } || adBlockList.any { l.contains(it) }) return true
+        // Parámetros UTM de PropellerAds u otras redes
+        if (adUtmPatterns.any { l.contains(it.lowercase()) }) return true
+        return false
     }
     private fun isHomePage(url: String) = url.contains(HOME_HOST)
 
@@ -84,26 +109,22 @@ class MainActivity : AppCompatActivity() {
             resetCount:   function(){try{return AdShield.resetCount();}catch(_){return 0;}},
             onCountUpdate:function(){}
           };
+          console.log('[AdShield] bridge listo en: '+window.location.href);
         })();
     """.trimIndent()
 
-    // ── Touch fix: alimenta lastDownTarget y lastClickX/Y de content-electron ─
     private val touchFixJs = """
         (function(){
           if(window.__adshieldTouchFix)return; window.__adshieldTouchFix=true;
           document.addEventListener('touchstart',function(e){
-            try{
-              var t=e.touches[0]; if(!t)return;
+            try{var t=e.touches[0];if(!t)return;
               e.target.dispatchEvent(new MouseEvent('mousedown',
-                {bubbles:true,cancelable:true,clientX:t.clientX,clientY:t.clientY}));
-            }catch(_){}
+                {bubbles:true,cancelable:true,clientX:t.clientX,clientY:t.clientY}));}catch(_){}
           },{passive:true,capture:true});
           document.addEventListener('touchend',function(e){
-            try{
-              var t=e.changedTouches[0]; if(!t)return;
+            try{var t=e.changedTouches[0];if(!t)return;
               e.target.dispatchEvent(new MouseEvent('click',
-                {bubbles:true,cancelable:false,clientX:t.clientX,clientY:t.clientY}));
-            }catch(_){}
+                {bubbles:true,cancelable:false,clientX:t.clientX,clientY:t.clientY}));}catch(_){}
           },{passive:true,capture:true});
         })();
     """.trimIndent()
@@ -119,27 +140,28 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // ── CASO 2+3: iframeShield — elimina divs dinámicos + bloquea redirects ───
+    // ── iframeShield ──────────────────────────────────────────────────────────
+    // FIX CRÍTICO: z-index 2147483647 = ad SIEMPRE, sin comprobar tamaño
+    // Esto resuelve el caso height:auto confirmado por el usuario
     private val iframeShieldJs = """
         (function(){
           if(window.__ifs)return; window.__ifs=true;
+          console.log('[iframeShield] activo en: '+window.location.href);
 
-          // CASO 3a: Bloquear window.open dentro del iframe
-          var _lastTarget=null;
-          document.addEventListener('touchstart',function(e){_lastTarget=e.target;},{passive:true,capture:true});
-          document.addEventListener('mousedown',function(e){_lastTarget=e.target;},true);
+          var _lt=null;
+          document.addEventListener('touchstart',function(e){_lt=e.target;},{passive:true,capture:true});
+          document.addEventListener('mousedown',function(e){_lt=e.target;},true);
 
           window.open=function(url){
-            // Eliminar el div interceptor que disparó este window.open
-            var el=_lastTarget;
-            for(var i=0;i<8&&el&&el!==document.body;i++){
+            console.log('[iframeShield] window.open bloqueado:',url);
+            var el=_lt;
+            for(var i=0;i<10&&el&&el!==document.body;i++){
               try{
                 var cs=getComputedStyle(el);
                 var z=parseInt(cs.zIndex,10);
-                if(!isNaN(z)&&z>=500&&(cs.position==='fixed'||cs.position==='absolute')){
+                if(!isNaN(z)&&z>=100&&(cs.position==='fixed'||cs.position==='absolute')){
                   el.style.setProperty('display','none','important');
-                  el.style.setProperty('pointer-events','none','important');
-                  setTimeout(function(e){return function(){try{e.remove();}catch(_){}};}(el),30);
+                  setTimeout((function(e){return function(){try{e.remove();}catch(_){};};})(el),30);
                   break;
                 }
               }catch(_){}
@@ -150,30 +172,20 @@ class MainActivity : AppCompatActivity() {
                    location:{href:'about:blank',assign:function(){},replace:function(){}}};
           };
 
-          // CASO 3b: Evitar que el iframe redirecte al frame padre
           try{Object.defineProperty(window,'top',{get:function(){return window;},configurable:true});}catch(_){}
           try{Object.defineProperty(window,'parent',{get:function(){return window;},configurable:true});}catch(_){}
-
-          // CASO 3c: Bloquear location.assign/replace hacia dominios externos
           try{
             var _host=window.location.hostname;
             ['assign','replace'].forEach(function(m){
               var orig=window.location[m].bind(window.location);
               window.location[m]=function(u){
-                if(typeof u==='string'&&(u.startsWith('http')||u.startsWith('//'))&&u.indexOf(_host)===-1)return;
-                orig(u);
-              };
+                if(typeof u==='string'&&(u.startsWith('http')||u.startsWith('//'))&&u.indexOf(_host)===-1){
+                  console.log('[iframeShield] location.'+m+' bloqueado:',u);return;}
+                orig(u);};
             });
           }catch(_){}
-
-          // Eliminar meta refresh
-          function killMeta(){
-            document.querySelectorAll('meta[http-equiv="refresh"],meta[http-equiv="Refresh"]')
-              .forEach(function(m){m.remove();});
-          }
-          killMeta();
-
-          // Bloquear links externos (<a href>)
+          document.querySelectorAll('meta[http-equiv="refresh"],meta[http-equiv="Refresh"]')
+            .forEach(function(m){m.remove();});
           document.addEventListener('click',function(e){
             var el=e.target;
             for(var i=0;i<8&&el&&el!==document.body;i++){
@@ -183,15 +195,14 @@ class MainActivity : AppCompatActivity() {
                    &&href.indexOf(window.location.hostname)===-1
                    &&(href.startsWith('http')||href.startsWith('//'))){
                   e.preventDefault();e.stopImmediatePropagation();
-                  try{AdShield&&AdShield.contentBlocked();}catch(_){}return;
-                }
+                  try{AdShield&&AdShield.contentBlocked();}catch(_){}return;}
               }
               el=el.parentElement;
             }
           },true);
 
-          // CASO 1+2: MutationObserver — eliminar divs de ads dinámicos
-          var SAFE=['player','video','jw','vjs','plyr','fluid','content','wrapper'];
+          // ── FIX PRINCIPAL: isAdEl ahora detecta z-index:2147483647 SIN comprobar tamaño
+          var SAFE=['player','video','jw','vjs','plyr','fluid','controls','wrapper'];
           function isAdEl(el){
             if(!el||el.nodeType!==1)return false;
             var tag=el.tagName.toLowerCase();
@@ -199,13 +210,17 @@ class MainActivity : AppCompatActivity() {
             var cls=(typeof el.className==='string'?el.className:'').toLowerCase();
             var id=(el.id||'').toLowerCase();
             if(SAFE.some(function(c){return cls.indexOf(c)!==-1||id.indexOf(c)!==-1;}))return false;
+            // ── CASO CONFIRMADO: div PropellerAds con z-index 2147483647 en style attr
+            var inlineStyle=el.getAttribute('style')||'';
+            if(inlineStyle.indexOf('2147483647')!==-1)return true;
+            // ── Comprobación por computed style (para ads sin inline style)
             try{
               var cs=getComputedStyle(el);
               var z=parseInt(cs.zIndex,10);
               if(isNaN(z)||z<500)return false;
               if(cs.position!=='fixed'&&cs.position!=='absolute')return false;
               var r=el.getBoundingClientRect();
-              if(r.width<window.innerWidth*0.2||r.height<window.innerHeight*0.2)return false;
+              if(r.width<window.innerWidth*0.15||r.height<window.innerHeight*0.15)return false;
               return true;
             }catch(_){return false;}
           }
@@ -213,7 +228,8 @@ class MainActivity : AppCompatActivity() {
             try{
               el.style.setProperty('display','none','important');
               el.style.setProperty('pointer-events','none','important');
-              setTimeout(function(e){return function(){try{e.remove();}catch(_){};};}(el),30);
+              console.log('[iframeShield] nuke:',el.tagName,el.id,(el.className||'').toString().substring(0,30));
+              setTimeout((function(e){return function(){try{e.remove();}catch(_){};};})(el),30);
               try{AdShield&&AdShield.contentBlocked();}catch(_){}
             }catch(_){}
           }
@@ -229,30 +245,30 @@ class MainActivity : AppCompatActivity() {
                 if(m.type==='attributes'&&isAdEl(m.target))nuke(m.target);
               }
             }).observe(document.documentElement,{childList:true,subtree:true,
-              attributes:true,attributeFilter:['style','class']});
+              attributes:true,attributeFilter:['style','class','id']});
           }catch(_){}
           setInterval(function(){
-            killMeta();
+            document.querySelectorAll('meta[http-equiv="refresh"]').forEach(function(m){m.remove();});
             try{document.querySelectorAll('*').forEach(function(el){if(isAdEl(el))nuke(el);});}catch(_){}
-          },800);
+          },500);
           try{document.querySelectorAll('*').forEach(function(el){if(isAdEl(el))nuke(el);});}catch(_){}
-
-          // CSS de respaldo
           var s=document.createElement('style');
-          s.textContent='[style*="2147483647"]{display:none!important;pointer-events:none!important;}'+
-            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],div[class*="popup"]:not([class*="player"]),'+
-            'div[class*="overlay"]:not([class*="player"]):not([class*="video"]),'+
-            'div[class*="interstitial"],div[class*="preroll"]{display:none!important;}';
+          s.textContent=
+            // z-index 2147483647 confirmado por el usuario → ocultar siempre
+            '[style*="2147483647"]{display:none!important;pointer-events:none!important;}'+
+            // Div PropellerAds: fixed, right:0, top:0, width 340-380px
+            'div[style*="position: fixed"][style*="right: 0"],'+
+            'div[style*="position:fixed"][style*="right:0"],'+
+            'div[style*="position: fixed"][style*="top: 0"][style*="right"],'+
+            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],'+
+            'div[class*="popup"]:not([class*="player"]):not([class*="video"]),'+
+            'div[class*="overlay"]:not([class*="player"]):not([class*="video"]):not([class*="jw"]),'+
+            'div[class*="interstitial"],div[class*="preroll"],div[class*="pre-roll"]'+
+            '{display:none!important;}';
           (document.head||document.documentElement).appendChild(s);
         })();
     """.trimIndent()
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // FRAME INJECTOR — equivalente a frame-created de Electron
-    // Inyecta en iframes del MISMO ORIGEN vía contentDocument (acceso directo)
-    // Para iframes cross-origin: el try/catch falla silenciosamente
-    // Incluye content-electron.js + iframeShield + voe-ad-cleaner
-    // ═══════════════════════════════════════════════════════════════════════════
     private fun buildFrameInjectorJs(contentJs: String, voeJs: String): String {
         val fullPayload = "$bridgeAliasJs\n$touchFixJs\n$iframeShieldJs\n$voeJs\n$contentJs"
         val payloadJson = JSONObject.quote(fullPayload)
@@ -260,7 +276,7 @@ class MainActivity : AppCompatActivity() {
         (function(){
           if(window.__frameInjector)return; window.__frameInjector=true;
           var P=$payloadJson;
-          function injectFrame(iframe){
+          function doInject(iframe){
             try{
               var win=iframe.contentWindow;
               var doc=win&&(iframe.contentDocument||win.document);
@@ -269,24 +285,28 @@ class MainActivity : AppCompatActivity() {
               var s=doc.createElement('script');
               s.textContent=P;
               (doc.head||doc.documentElement).appendChild(s);
-            }catch(_){} // cross-origin SecurityError: ignorado
+              console.log('[FrameInjector] inyectado en:',iframe.src||'(sin src)');
+            }catch(_){}
           }
-          function injectAll(){
-            try{document.querySelectorAll('iframe').forEach(function(f){injectFrame(f);});}catch(_){}
+          function attachLoad(iframe){
+            doInject(iframe);
+            iframe.addEventListener('load',function(){doInject(iframe);});
           }
-          injectAll();
-          setInterval(injectAll,800);
+          try{document.querySelectorAll('iframe').forEach(attachLoad);}catch(_){}
           try{
             new MutationObserver(function(muts){
               muts.forEach(function(m){
                 m.addedNodes.forEach(function(n){
                   if(!n||n.nodeType!==1)return;
-                  if(n.tagName==='IFRAME')injectFrame(n);
-                  else if(n.querySelectorAll)n.querySelectorAll('iframe').forEach(injectFrame);
+                  if(n.tagName==='IFRAME')attachLoad(n);
+                  else if(n.querySelectorAll)n.querySelectorAll('iframe').forEach(attachLoad);
                 });
               });
             }).observe(document.documentElement,{childList:true,subtree:true});
           }catch(_){}
+          setInterval(function(){
+            try{document.querySelectorAll('iframe').forEach(attachLoad);}catch(_){}
+          },500);
         })();
         """.trimIndent()
     }
@@ -295,7 +315,6 @@ class MainActivity : AppCompatActivity() {
         Charset.forName(name)
     } catch (e: Exception) { Charsets.UTF_8 }
 
-    // HTTP injection para iframes cross-origin
     private fun injectIntoIframeResponse(url: String, reqHeaders: Map<String,String>): WebResourceResponse? {
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
@@ -305,17 +324,18 @@ class MainActivity : AppCompatActivity() {
             conn.setRequestProperty("Accept","text/html,application/xhtml+xml,*/*;q=0.8")
             reqHeaders["Referer"]?.let        { conn.setRequestProperty("Referer", it) }
             reqHeaders["Accept-Language"]?.let{ conn.setRequestProperty("Accept-Language", it) }
-            if (conn.responseCode != 200) return null
+            val code = conn.responseCode
+            if (code != 200) { Log.d(TAG,"iframe HTTP $code: $url"); return null }
             val ct = conn.contentType ?: "text/html"
             if (!ct.contains("html")) return null
             val charset = Regex("charset=([\\w-]+)").find(ct)?.groupValues?.get(1) ?: "utf-8"
             val cs      = safeCharset(charset)
             val html    = conn.inputStream.bufferedReader(cs).readText()
             if (!html.trimStart().startsWith("<")) return null
-            val bridgeSafe = bridgeAliasJs.replace("</script>","<\\/script>")
-            val shieldSafe = iframeShieldJs.replace("</script>","<\\/script>")
-            val voeSafe    = (readAsset("voe-ad-cleaner.js") ?: "").replace("</script>","<\\/script>")
-            val inject     = "<script>$bridgeSafe\n$shieldSafe\n$voeSafe</script>"
+            val b = bridgeAliasJs.replace("</script>","<\\/script>")
+            val s = iframeShieldJs.replace("</script>","<\\/script>")
+            val v = (readAsset("voe-ad-cleaner.js") ?: "").replace("</script>","<\\/script>")
+            val inject = "<script>$b\n$s\n$v</script>"
             val modified = when {
                 html.contains("<head>",ignoreCase=true) ->
                     html.replaceFirst(Regex("(?i)<head>"),"<head>$inject")
@@ -323,14 +343,16 @@ class MainActivity : AppCompatActivity() {
                     html.replaceFirst(Regex("(?i)<body>"),"<body>$inject")
                 else -> "$inject$html"
             }
+            Log.d(TAG,"iframe inyectado: $url")
             WebResourceResponse("text/html", charset, ByteArrayInputStream(modified.toByteArray(cs)))
-        } catch (e: Exception) { null }
+        } catch (e: Exception) { Log.e(TAG,"iframe inject error",e); null }
     }
 
     private fun earlyInject(url: String) {
         if (isHomePage(url)) { webView.evaluateJavascript(lightCssJs, null); return }
         webView.evaluateJavascript(bridgeAliasJs, null)
         webView.evaluateJavascript(touchFixJs, null)
+        webView.evaluateJavascript(iframeShieldJs, null)
         readAsset("voe-ad-cleaner.js")?.let {
             webView.evaluateJavascript("(function(){$it})();", null)
         }
@@ -338,17 +360,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun fullInject(url: String) {
         if (isHomePage(url)) { webView.evaluateJavascript(lightCssJs, null); return }
-        val contentJs = readAsset("content-electron.js") ?: return
+        val contentJs = readAsset("content-electron.js") ?: ""
         val voeJs     = readAsset("voe-ad-cleaner.js") ?: ""
         webView.evaluateJavascript(bridgeAliasJs, null)
         webView.evaluateJavascript(touchFixJs, null)
-        // content-electron.js directo (ya tiene su propio IIFE)
-        webView.evaluateJavascript(contentJs, null)
-        // voe-ad-cleaner con guard
-        webView.evaluateJavascript(
+        webView.evaluateJavascript(iframeShieldJs, null)
+        if (contentJs.isNotEmpty()) webView.evaluateJavascript(contentJs, null)
+        if (voeJs.isNotEmpty()) webView.evaluateJavascript(
             "(function(){if(window.__adshieldVoe)return;window.__adshieldVoe=true;$voeJs})();",null)
-        // Frame injector: replica frame-created de Electron para iframes same-origin
-        webView.evaluateJavascript(buildFrameInjectorJs(contentJs, voeJs), null)
+        if (contentJs.isNotEmpty() && voeJs.isNotEmpty())
+            webView.evaluateJavascript(buildFrameInjectorJs(contentJs, voeJs), null)
     }
 
     private val reInjectRunnable = object : Runnable {
@@ -356,8 +377,8 @@ class MainActivity : AppCompatActivity() {
             val url = try { webView.url ?: "" } catch (e: Exception) { "" }
             if (!isHomePage(url)) {
                 webView.evaluateJavascript(bridgeAliasJs, null)
-                val voe = readAsset("voe-ad-cleaner.js")
-                voe?.let {
+                webView.evaluateJavascript(iframeShieldJs, null)
+                readAsset("voe-ad-cleaner.js")?.let {
                     webView.evaluateJavascript(
                         "(function(){if(!window.__adshieldVoeR){window.__adshieldVoeR=true;$it}})()",null)
                 }
@@ -370,6 +391,7 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface fun getCount(): Int = blockedCount
         @JavascriptInterface fun resetCount(): Int { blockedCount=0; return 0 }
         @JavascriptInterface fun contentBlocked() { blockedCount++ }
+        @JavascriptInterface fun log(msg: String) { Log.d(TAG,"[JS] $msg") }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -411,22 +433,19 @@ class MainActivity : AppCompatActivity() {
             ): WebResourceResponse? {
                 val url    = request.url.toString()
                 val accept = request.requestHeaders["Accept"] ?: ""
-
                 if (isAdUrl(url)) {
+                    Log.d(TAG,"BLOQUEADO: $url")
                     blockedCount++
                     return WebResourceResponse("text/plain","utf-8",
                         ByteArrayInputStream(ByteArray(0)))
                 }
-                if (!request.isForMainFrame && url.contains("favicon.ico")) {
+                if (!request.isForMainFrame && url.contains("favicon.ico"))
                     return WebResourceResponse("image/x-icon","utf-8",
                         ByteArrayInputStream(ByteArray(0)))
-                }
                 if (url.startsWith("data:application/pdf") ||
-                    url.startsWith("data:application/octet")) {
+                    url.startsWith("data:application/octet"))
                     return WebResourceResponse("text/plain","utf-8",
                         ByteArrayInputStream(ByteArray(0)))
-                }
-                // HTTP injection para iframes HTML
                 if (!request.isForMainFrame &&
                     (accept.contains("text/html") || accept.contains("*/*") || accept.isEmpty()) &&
                     url.startsWith("https") && !isHomePage(url)) {
@@ -436,26 +455,30 @@ class MainActivity : AppCompatActivity() {
                 return super.shouldInterceptRequest(view, request)
             }
 
-            // CASO 3: Bloquear redirecciones que parecen ads
+            // ── FIX: shouldOverrideUrlLoading ahora detecta PropellerAds y parámetros UTM
             override fun shouldOverrideUrlLoading(
                 view: WebView, request: WebResourceRequest
             ): Boolean {
-                val url         = request.url.toString()
-                val currentUrl  = view.url ?: ""
-                val currentHost = try { Uri.parse(currentUrl).host ?: "" } catch (e: Exception) { "" }
-                val targetHost  = request.url.host ?: ""
+                val url        = request.url.toString()
+                val currentUrl = view.url ?: ""
+                val currentHost= try { Uri.parse(currentUrl).host ?: "" } catch (e: Exception) { "" }
+                val targetHost = request.url.host ?: ""
 
-                if (isAdUrl(url)) { blockedCount++; return true }
+                // Bloquear si es URL de ad conocida
+                if (isAdUrl(url)) { Log.d(TAG,"NAV AD: $url"); blockedCount++; return true }
 
-                // Si estamos en un sitio de streaming y la navegación va a
-                // un dominio completamente distinto con patrón de redirect de ad → bloquear
-                if (!isHomePage(currentUrl) && currentHost.isNotEmpty() &&
-                    targetHost.isNotEmpty() && currentHost != targetHost &&
-                    !targetHost.contains(currentHost.takeLast(15)) &&
-                    !currentHost.contains(targetHost.takeLast(15))) {
-                    val l = url.lowercase()
-                    if (adRedirectKeywords.any { l.contains(it) }) {
-                        blockedCount++; return true
+                // Navegación normal desde la página principal → siempre permitir
+                if (isHomePage(currentUrl)) return false
+
+                // En sitios de streaming: bloquear navegación a dominio distinto
+                // excepto si es subdominio del mismo sitio
+                if (currentHost.isNotEmpty() && targetHost.isNotEmpty() && currentHost != targetHost) {
+                    val curBase = currentHost.split(".").takeLast(2).joinToString(".")
+                    val tgtBase = targetHost.split(".").takeLast(2).joinToString(".")
+                    if (curBase != tgtBase) {
+                        Log.d(TAG,"CROSS-DOMAIN BLOQUEADO: $currentHost → $targetHost")
+                        blockedCount++
+                        return true
                     }
                 }
                 return false
@@ -478,7 +501,7 @@ class MainActivity : AppCompatActivity() {
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean,
                 isUserGesture: Boolean, resultMsg: android.os.Message?
-            ): Boolean = false
+            ): Boolean { Log.d(TAG,"onCreateWindow bloqueado"); return false }
         }
 
         webView.loadUrl(APP_URL)
