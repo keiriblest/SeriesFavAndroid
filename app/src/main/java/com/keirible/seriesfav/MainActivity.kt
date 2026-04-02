@@ -20,7 +20,6 @@ class MainActivity : AppCompatActivity() {
     private var blockedCount = 0
     private val handler = Handler(Looper.getMainLooper())
     private val APP_URL = "https://keiriblest.github.io/SeriesFav/mobile.html"
-
     private var adPatterns: List<String> = emptyList()
 
     private fun readAsset(name: String): String? = try {
@@ -41,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun isAdUrl(url: String) = adPatterns.any { url.contains(it) }
 
+    // Bridge alias para los scripts de adshield
     private val bridgeAliasJs = """
         (function(){
           if(window.__adshieldBridge) return;
@@ -54,15 +54,14 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
+    // Fix de touch events para Android
     private val touchFixJs = """
         (function(){
           if(window.__adshieldTouchFix) return;
           window.__adshieldTouchFix = true;
           document.addEventListener('touchstart', function(e){
             try {
-              var t = e.touches[0];
-              if(!t) return;
-              window.__lastTouchTarget = e.target;
+              var t = e.touches[0]; if(!t) return;
               var fake = new MouseEvent('mousedown',{bubbles:true,cancelable:true,
                 clientX:t.clientX,clientY:t.clientY});
               e.target.dispatchEvent(fake);
@@ -71,6 +70,7 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
+    // CSS anti-ads completo
     private val adCssJs = """
         (function(){
           if(document.__adshieldCssContent) return;
@@ -81,7 +81,6 @@ class MainActivity : AppCompatActivity() {
             'div[style*="position:fixed"][style*="top:0"],\n' +
             'div[style*="z-index: 2147483647"], div[style*="z-index:2147483647"],\n' +
             'div[style*="z-index: 999999"], div[style*="z-index:999999"],\n' +
-            'div[style*="z-index: 99999"], div[style*="z-index:99999"],\n' +
             '[style*="2147483647"],\n' +
             '.voe-blocker, #voe-blocker,\n' +
             'div[class*="voe-ad"], div[id*="voe-ad"],\n' +
@@ -98,11 +97,108 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
+    // IFRAME SHIELD — se inyecta dentro de cada iframe del player
+    // Bloquea: window.open, top.location, parent.location, overlays, links externos
+    private val iframeShieldJs = """
+        (function(){
+          'use strict';
+          if(window.__iframeShield) return;
+          window.__iframeShield = true;
+
+          // 1. Bloquear window.open completamente
+          window.open = function(url){
+            console.log('[iframeShield] window.open bloqueado:', url);
+            return {closed:false,close:function(){},focus:function(){},
+                    blur:function(){},postMessage:function(){},
+                    location:{href:'about:blank',assign:function(){},replace:function(){}}};
+          };
+
+          // 2. Bloquear redirecciones via top.location y parent.location
+          try {
+            Object.defineProperty(window, 'top',    { get: function(){ return window; }, configurable:true });
+            Object.defineProperty(window, 'parent', { get: function(){ return window; }, configurable:true });
+          } catch(_) {}
+
+          // 3. Bloquear document.location cambios a dominios externos
+          try {
+            var _realHref = window.location.href;
+            var _loc = window.location;
+            ['assign','replace'].forEach(function(m){
+              var orig = _loc[m].bind(_loc);
+              _loc[m] = function(url){
+                if(typeof url === 'string' && url.indexOf(window.location.hostname) === -1
+                   && (url.startsWith('http') || url.startsWith('//'))){
+                  console.log('[iframeShield] location.' + m + ' bloqueado:', url);
+                  return;
+                }
+                orig(url);
+              };
+            });
+          } catch(_) {}
+
+          // 4. Bloquear clicks en links que navegan fuera
+          document.addEventListener('click', function(e){
+            var el = e.target;
+            for(var i = 0; i < 6 && el && el !== document.body; i++){
+              if(el.tagName === 'A'){
+                var href = el.getAttribute('href') || '';
+                if(href && !href.startsWith('#') && !href.startsWith('javascript')
+                   && href.indexOf(window.location.hostname) === -1
+                   && (href.startsWith('http') || href.startsWith('//'))){
+                  e.preventDefault();
+                  e.stopImmediatePropagation();
+                  console.log('[iframeShield] link bloqueado:', href);
+                  return;
+                }
+              }
+              el = el.parentElement;
+            }
+          }, true);
+
+          // 5. Eliminar overlays de ads dentro del iframe
+          function nukeOverlays(){
+            document.querySelectorAll('*').forEach(function(el){
+              try {
+                var s = el.getAttribute('style') || '';
+                var tag = el.tagName.toLowerCase();
+                if(['video','audio','canvas','iframe'].indexOf(tag) !== -1) return;
+                var cls = (typeof el.className === 'string' ? el.className : '').toLowerCase();
+                var id  = (el.id || '').toLowerCase();
+                var safe = ['player','jw','video','content','container'];
+                if(safe.some(function(w){ return cls.indexOf(w)!==-1 || id.indexOf(w)!==-1; })) return;
+                if(s.indexOf('2147483647') !== -1 ||
+                   (s.indexOf('fixed') !== -1 && el.querySelector && el.querySelector('iframe'))){
+                  el.style.cssText += ';display:none!important;pointer-events:none!important;';
+                }
+              } catch(_){}
+            });
+          }
+
+          try {
+            new MutationObserver(function(muts){
+              muts.forEach(function(m){
+                m.addedNodes.forEach(function(n){ if(n.nodeType===1) nukeOverlays(); });
+                if(m.type==='attributes') nukeOverlays();
+              });
+            }).observe(document.documentElement,
+              {childList:true, subtree:true, attributes:true, attributeFilter:['style','class']});
+          } catch(_) {}
+
+          setInterval(nukeOverlays, 800);
+          if(document.readyState==='loading'){
+            document.addEventListener('DOMContentLoaded', nukeOverlays);
+          } else { nukeOverlays(); }
+
+          console.log('[iframeShield] activo en:', window.location.href);
+        })();
+    """.trimIndent()
+
     private fun buildIframeInjection(): String {
-        val voe = readAsset("voe-ad-cleaner.js") ?: ""
-        val bridge = bridgeAliasJs.replace("</script>", "<\\/script>")
-        val voeSafe = voe.replace("</script>", "<\\/script>")
-        return "<script>$bridge\n$voeSafe</script>"
+        val voe    = readAsset("voe-ad-cleaner.js") ?: ""
+        val shield = iframeShieldJs.replace("</script>", "<\\/script>")
+        val bridgeSafe = bridgeAliasJs.replace("</script>", "<\\/script>")
+        val voeSafe    = voe.replace("</script>", "<\\/script>")
+        return "<script>$bridgeSafe\n$shield\n$voeSafe</script>"
     }
 
     private fun safeCharset(name: String): Charset = try {
@@ -139,13 +235,11 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(bridgeAliasJs, null)
         webView.evaluateJavascript(touchFixJs, null)
         webView.evaluateJavascript(adCssJs, null)
-        val contentJs = readAsset("content-electron.js")
-        val voeJs     = readAsset("voe-ad-cleaner.js")
-        contentJs?.let {
+        readAsset("content-electron.js")?.let {
             webView.evaluateJavascript(
                 "(function(){ if(window.__adshieldContent) return; window.__adshieldContent=true; $it })();", null)
         }
-        voeJs?.let {
+        readAsset("voe-ad-cleaner.js")?.let {
             webView.evaluateJavascript(
                 "(function(){ if(window.__adshieldVoe) return; window.__adshieldVoe=true; $it })();", null)
         }
@@ -155,8 +249,7 @@ class MainActivity : AppCompatActivity() {
         override fun run() {
             webView.evaluateJavascript(bridgeAliasJs, null)
             webView.evaluateJavascript(adCssJs, null)
-            val voeJs = readAsset("voe-ad-cleaner.js")
-            voeJs?.let {
+            readAsset("voe-ad-cleaner.js")?.let {
                 webView.evaluateJavascript(
                     "(function(){ if(!window.__adshieldVoeReactive){ window.__adshieldVoeReactive=true; $it } })()", null)
             }
@@ -220,6 +313,7 @@ class MainActivity : AppCompatActivity() {
                         ByteArrayInputStream(ByteArray(0)))
                 }
 
+                // Inyectar iframeShield en iframes HTML
                 if (!request.isForMainFrame &&
                     accept.contains("text/html") &&
                     url.startsWith("http")) {
@@ -247,6 +341,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Bloquar TODOS los popups/nuevas ventanas desde cualquier frame
         webView.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean,
