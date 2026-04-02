@@ -33,53 +33,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Alias: conecta window.adshieldElectron (usado en los scripts)
-    // con window.AdShield (el bridge Java registrado en el WebView)
+    // PROBLEMA 1: content-electron.js usa mousedown/click para trackear el último
+    // elemento tocado. En Android son touch events, no mouse events.
+    // Solución: inyectar listeners de touchstart que alimentan las mismas variables.
+    private val touchFixJs = """
+        (function(){
+          if(window.__adshieldTouchFix) return;
+          window.__adshieldTouchFix = true;
+          document.addEventListener('touchstart', function(e){
+            if(e.touches && e.touches[0]){
+              window.__lastTouchX = e.touches[0].clientX;
+              window.__lastTouchY = e.touches[0].clientY;
+              window.__lastTouchTarget = e.target;
+            }
+          }, true);
+          // Monkey-patch para que los scripts lean touch coords si no hay mouse
+          var _origAdd = document.addEventListener.bind(document);
+          document.addEventListener = function(type, fn, capture){
+            if(type === 'mousedown'){
+              _origAdd('touchstart', function(e){
+                var fake = {target: e.target};
+                fn(fake);
+              }, capture);
+            }
+            if(type === 'click'){
+              _origAdd('touchend', function(e){
+                if(e.changedTouches && e.changedTouches[0]){
+                  var fake = {clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY};
+                  fn(fake);
+                }
+              }, capture);
+            }
+            return _origAdd(type, fn, capture);
+          };
+        })();
+    """.trimIndent()
+
+    // PROBLEMA 2: el bridge window.adshieldElectron debe estar disponible
+    // ANTES de que corran los scripts. Lo inyectamos en onPageStarted.
     private val bridgeAliasJs = """
         (function(){
           if(window.adshieldElectron) return;
           window.adshieldElectron = {
             reportBlocked: function() {
-              try { window.AdShield && window.AdShield.contentBlocked(); } catch(_) {}
+              try { if(window.AdShield) window.AdShield.contentBlocked(); } catch(_) {}
             }
           };
         })();
     """.trimIndent()
 
-    private val injectCssJs = """
-        (function(){
-          if(document.__adshieldCss) return;
-          document.__adshieldCss = true;
-          var css = [
-            'div[style*="position:fixed"][style*="2147483647"]',
-            'div[style*="position: fixed"][style*="2147483647"]',
-            'div[class*="pop-up"],div[class*="popup"],div[id*="popup"]',
-            'div[id*="overlay-ad"],div[class*="ad-overlay"],div[class*="ad-layer"]',
-            'div[class*="preroll"],div[class*="pre-roll"],div[class*="interstitial"]',
-            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],div[id*="voe-ad"]',
-            '.jw-overlays > div:not([class*="jw-"])',
-            'iframe[src*="ads."],iframe[src*="pop."],iframe[src*="track."]',
-            'iframe[src*="click."],iframe[id*="ad"],iframe[class*="ad"]',
-            '[style*="2147483647"]'
-          ].join(',') + '{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;width:0!important}';
-          var s = document.createElement('style');
-          s.textContent = css;
-          (document.head || document.documentElement).appendChild(s);
-        })();
-    """.trimIndent()
-
-    private fun inject() {
+    private fun injectAll(phase: String) {
         val contentJs = readAsset("content-electron.js")
         val voeJs     = readAsset("voe-ad-cleaner.js")
-        val guard     = "if(window.__adshieldInjected) return; window.__adshieldInjected = true;"
-
-        // 1. Alias bridge primero
+        // En onPageStarted solo inyectamos el bridge (el DOM no existe aún)
         webView.evaluateJavascript(bridgeAliasJs, null)
-        // 2. CSS anti-popups
-        webView.evaluateJavascript(injectCssJs, null)
-        // 3. Scripts de bloqueo
-        contentJs?.let { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
-        voeJs?.let     { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
+        webView.evaluateJavascript(touchFixJs, null)
+        if (phase == "finished") {
+            // Scripts completos solo cuando el DOM está listo
+            contentJs?.let {
+                val guard = "if(window.__adshieldContent) return; window.__adshieldContent=true;"
+                webView.evaluateJavascript("(function(){$guard$it})();", null)
+            }
+            voeJs?.let {
+                val guard = "if(window.__adshieldVoe) return; window.__adshieldVoe=true;"
+                webView.evaluateJavascript("(function(){$guard$it})();", null)
+            }
+        }
     }
 
     private val reInjectRunnable = object : Runnable {
@@ -88,7 +107,7 @@ class MainActivity : AppCompatActivity() {
             if (voeJs != null) {
                 webView.evaluateJavascript(bridgeAliasJs, null)
                 webView.evaluateJavascript(
-                    "(function(){ if(!window.__adshieldVoeActive){ window.__adshieldVoeActive=true; ${voeJs} } })()", null
+                    "(function(){ if(!window.__adshieldVoeActive){ window.__adshieldVoeActive=true; $voeJs } })()", null
                 )
             }
             handler.postDelayed(this, 4000)
@@ -108,19 +127,37 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
 
         webView.settings.apply {
-            javaScriptEnabled      = true
-            domStorageEnabled      = true
-            allowFileAccess        = false
+            javaScriptEnabled                = true
+            domStorageEnabled                = true
+            allowFileAccess                  = false
             mediaPlaybackRequiresUserGesture = false
-            mixedContentMode       = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-            useWideViewPort        = true
-            loadWithOverviewMode   = true
+            mixedContentMode                 = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            useWideViewPort                  = true
+            loadWithOverviewMode             = true
         }
 
         WebView.setWebContentsDebuggingEnabled(true)
         webView.addJavascriptInterface(AdShieldBridge(), "AdShield")
 
         webView.webViewClient = object : WebViewClient() {
+
+            // PROBLEMA 3: algunos ads navegan la página entera (no usan window.open).
+            // shouldOverrideUrlLoading bloquea esas navegaciones.
+            override fun shouldOverrideUrlLoading(
+                view: WebView, request: WebResourceRequest
+            ): Boolean {
+                val url = request.url.toString()
+                // Dejar pasar la URL principal y sus mismos dominios
+                if (url.contains("keiriblest.github.io") ||
+                    url.contains("github.io")) return false
+                // Bloquear si coincide con patrones de ads
+                if (adPatterns.any { url.contains(it) }) {
+                    blockedCount++
+                    return true // bloqueado
+                }
+                return false
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView, request: WebResourceRequest
             ): WebResourceResponse? {
@@ -135,9 +172,16 @@ class MainActivity : AppCompatActivity() {
                 return super.shouldInterceptRequest(view, request)
             }
 
+            // PROBLEMA 4: inyectar el bridge lo antes posible (onPageStarted)
+            // para que esté disponible cuando los scripts de la página corran.
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                injectAll("started")
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
-                inject()
+                injectAll("finished")
             }
 
             override fun onReceivedError(
