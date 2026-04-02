@@ -2,6 +2,7 @@ package com.keirible.seriesfav
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +10,7 @@ import android.webkit.*
 import androidx.appcompat.app.AppCompatActivity
 import com.keirible.seriesfav.R
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -28,20 +30,27 @@ class MainActivity : AppCompatActivity() {
         "popcash.net","popads.net","popadvert.com","popunder",
         "propellerads.com","propellerclick.com","pphventures.com",
         "trafficjunky.net","trafficfactory.biz","trafficforce.com",
-        "adsterra.com","adsterratech.com",
-        "juicyads.com","hilltopads.net","hilltopads.com",
-        "clickadu.com","clickaine.com","adnium.com","fuckingfast.co",
+        "adsterra.com","adsterratech.com","juicyads.com",
+        "hilltopads.net","hilltopads.com","clickadu.com",
+        "clickaine.com","adnium.com","fuckingfast.co",
         "ero-advertising.com","tsyndicate.com",
         "doubleclick.net","googlesyndication.com",
         "adservice.google","pagead2.googlesyndication",
         "revcontent.com","taboola.com","outbrain.com",
-        "amazon-adsystem.com","smartadserver.com",
-        "openx.net","pubmatic.com","rubiconproject.com","appnexus.com",
+        "amazon-adsystem.com","smartadserver.com","openx.net",
+        "pubmatic.com","rubiconproject.com","appnexus.com",
         "criteo.com","criteo.net","bidswitch.net","sovrn.com",
         "adsrvr.org","casalemedia.com","indexexchange.com",
         "/pop.js","/popup.js","/pops.js","/ad.js","/ads.js",
         "/banner.js","/popunder.js","adframe","adserver",
         "pop-ads","pop_ads","popads","poptm"
+    )
+
+    // Palabras clave de URLs que son redirecciones de ad
+    private val adRedirectKeywords = listOf(
+        "click.","track.","goto.","redirect.","exit.","refer.",
+        "aff.","redir.","go.php","click.php","out.php",
+        "bounce","adclick","adredirect","adtarget"
     )
 
     private fun readAsset(name: String): String? = try {
@@ -52,13 +61,10 @@ class MainActivity : AppCompatActivity() {
         val json = readAsset("rules.json") ?: return
         val arr  = JSONArray(json)
         adPatterns = (0 until arr.length()).mapNotNull { i ->
-            arr.getJSONObject(i)
-                .optJSONObject("condition")
+            arr.getJSONObject(i).optJSONObject("condition")
                 ?.optString("urlFilter")
-                ?.let { raw ->
-                    raw.removePrefix("||").removeSuffix("^")
-                        .replace("*","").trim().takeIf { it.length > 3 }
-                }
+                ?.let { r -> r.removePrefix("||").removeSuffix("^")
+                    .replace("*","").trim().takeIf { it.length > 3 } }
         }
     }
 
@@ -68,7 +74,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun isHomePage(url: String) = url.contains(HOME_HOST)
 
-    // ── Bridge — disponible en todos los frames via addJavascriptInterface ────
+    // ── Bridge ────────────────────────────────────────────────────────────────
     private val bridgeAliasJs = """
         (function(){
           if(window.__adshieldBridge)return; window.__adshieldBridge=true;
@@ -81,20 +87,17 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // ── Touch fix: dispara mousedown sintético desde touchstart ───────────────
-    // content-electron.js rastrea lastDownTarget con mousedown
+    // ── Touch fix: alimenta lastDownTarget y lastClickX/Y de content-electron ─
     private val touchFixJs = """
         (function(){
           if(window.__adshieldTouchFix)return; window.__adshieldTouchFix=true;
           document.addEventListener('touchstart',function(e){
             try{
               var t=e.touches[0]; if(!t)return;
-              // Mismo target que recibirá el click → alimenta lastDownTarget
               e.target.dispatchEvent(new MouseEvent('mousedown',
                 {bubbles:true,cancelable:true,clientX:t.clientX,clientY:t.clientY}));
             }catch(_){}
           },{passive:true,capture:true});
-          // También alimentar lastClickX/Y cuando termina el toque
           document.addEventListener('touchend',function(e){
             try{
               var t=e.changedTouches[0]; if(!t)return;
@@ -105,7 +108,6 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // ── CSS suave para página principal ──────────────────────────────────────
     private val lightCssJs = """
         (function(){
           if(document.__adshieldCssLight)return; document.__adshieldCssLight=true;
@@ -117,83 +119,101 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // ── iframeShield: inyectado en iframes vía HTTP intercept ─────────────────
-    // Replica lo que content-electron.js hace cuando window.self !== window.top
+    // ── CASO 2+3: iframeShield — elimina divs dinámicos + bloquea redirects ───
     private val iframeShieldJs = """
         (function(){
           if(window.__ifs)return; window.__ifs=true;
 
-          // Bloquear window.open
-          window.open=function(){
+          // CASO 3a: Bloquear window.open dentro del iframe
+          var _lastTarget=null;
+          document.addEventListener('touchstart',function(e){_lastTarget=e.target;},{passive:true,capture:true});
+          document.addEventListener('mousedown',function(e){_lastTarget=e.target;},true);
+
+          window.open=function(url){
+            // Eliminar el div interceptor que disparó este window.open
+            var el=_lastTarget;
+            for(var i=0;i<8&&el&&el!==document.body;i++){
+              try{
+                var cs=getComputedStyle(el);
+                var z=parseInt(cs.zIndex,10);
+                if(!isNaN(z)&&z>=500&&(cs.position==='fixed'||cs.position==='absolute')){
+                  el.style.setProperty('display','none','important');
+                  el.style.setProperty('pointer-events','none','important');
+                  setTimeout(function(e){return function(){try{e.remove();}catch(_){}};}(el),30);
+                  break;
+                }
+              }catch(_){}
+              el=el.parentElement;
+            }
             try{AdShield&&AdShield.contentBlocked();}catch(_){}
             return{closed:false,close:function(){},focus:function(){},blur:function(){},
                    location:{href:'about:blank',assign:function(){},replace:function(){}}};
           };
 
-          // Congelar top y parent
+          // CASO 3b: Evitar que el iframe redirecte al frame padre
           try{Object.defineProperty(window,'top',{get:function(){return window;},configurable:true});}catch(_){}
           try{Object.defineProperty(window,'parent',{get:function(){return window;},configurable:true});}catch(_){}
 
-          // Bloquear location.assign / replace externos
+          // CASO 3c: Bloquear location.assign/replace hacia dominios externos
           try{
+            var _host=window.location.hostname;
             ['assign','replace'].forEach(function(m){
               var orig=window.location[m].bind(window.location);
               window.location[m]=function(u){
-                if(typeof u==='string'&&(u.startsWith('http')||u.startsWith('//'))
-                   &&u.indexOf(window.location.hostname)===-1)return;
+                if(typeof u==='string'&&(u.startsWith('http')||u.startsWith('//'))&&u.indexOf(_host)===-1)return;
                 orig(u);
               };
             });
           }catch(_){}
 
-          // Bloquear meta refresh
+          // Eliminar meta refresh
           function killMeta(){
             document.querySelectorAll('meta[http-equiv="refresh"],meta[http-equiv="Refresh"]')
               .forEach(function(m){m.remove();});
           }
           killMeta();
 
-          // Bloquear links externos (mismo patrón que content-electron.js)
+          // Bloquear links externos (<a href>)
           document.addEventListener('click',function(e){
-            var a=e.target.closest?e.target.closest('a'):null;
-            if(!a){var el=e.target;for(var i=0;i<6;i++){if(el&&el.tagName==='A'){a=el;break;}el=el&&el.parentElement;}}
-            if(a){
-              var href=a.getAttribute('href')||'';
-              if(href&&!href.startsWith('#')&&!href.startsWith('javascript')
-                 &&href.indexOf(window.location.hostname)===-1
-                 &&(href.startsWith('http')||href.startsWith('//')||href.startsWith('www'))){
-                e.preventDefault();e.stopImmediatePropagation();
-                try{AdShield&&AdShield.contentBlocked();}catch(_){}
-                return;
+            var el=e.target;
+            for(var i=0;i<8&&el&&el!==document.body;i++){
+              if(el.tagName==='A'){
+                var href=el.getAttribute('href')||'';
+                if(href&&!href.startsWith('#')&&!href.startsWith('javascript')
+                   &&href.indexOf(window.location.hostname)===-1
+                   &&(href.startsWith('http')||href.startsWith('//'))){
+                  e.preventDefault();e.stopImmediatePropagation();
+                  try{AdShield&&AdShield.contentBlocked();}catch(_){}return;
+                }
               }
+              el=el.parentElement;
             }
           },true);
 
-          // MutationObserver: eliminar divs de ads (same logic as content-electron.js)
-          var SAFE=['player','video','jw','vjs','plyr','fluid','content'];
-          function isAdNode(node){
-            if(!node||node.nodeType!==1)return false;
-            var tag=node.tagName.toLowerCase();
+          // CASO 1+2: MutationObserver — eliminar divs de ads dinámicos
+          var SAFE=['player','video','jw','vjs','plyr','fluid','content','wrapper'];
+          function isAdEl(el){
+            if(!el||el.nodeType!==1)return false;
+            var tag=el.tagName.toLowerCase();
             if(['video','audio','canvas','img','svg','iframe','button','input'].indexOf(tag)!==-1)return false;
-            var cls=(typeof node.className==='string'?node.className:'').toLowerCase();
-            var id=(node.id||'').toLowerCase();
+            var cls=(typeof el.className==='string'?el.className:'').toLowerCase();
+            var id=(el.id||'').toLowerCase();
             if(SAFE.some(function(c){return cls.indexOf(c)!==-1||id.indexOf(c)!==-1;}))return false;
             try{
-              var cs=window.getComputedStyle(node);
-              var pos=cs.position;
-              if(pos!=='fixed'&&pos!=='absolute')return false;
+              var cs=getComputedStyle(el);
               var z=parseInt(cs.zIndex,10);
               if(isNaN(z)||z<500)return false;
-              var r=node.getBoundingClientRect();
-              if(r.width<window.innerWidth*0.25||r.height<window.innerHeight*0.25)return false;
+              if(cs.position!=='fixed'&&cs.position!=='absolute')return false;
+              var r=el.getBoundingClientRect();
+              if(r.width<window.innerWidth*0.2||r.height<window.innerHeight*0.2)return false;
               return true;
             }catch(_){return false;}
           }
-          function nuke(node){
+          function nuke(el){
             try{
-              node.style.setProperty('display','none','important');
-              node.style.setProperty('pointer-events','none','important');
-              setTimeout(function(){try{node.remove();}catch(_){}},50);
+              el.style.setProperty('display','none','important');
+              el.style.setProperty('pointer-events','none','important');
+              setTimeout(function(e){return function(){try{e.remove();}catch(_){};};}(el),30);
               try{AdShield&&AdShield.contentBlocked();}catch(_){}
             }catch(_){}
           }
@@ -203,31 +223,79 @@ class MainActivity : AppCompatActivity() {
                 var m=muts[i];
                 for(var j=0;j<m.addedNodes.length;j++){
                   var n=m.addedNodes[j];
-                  if(isAdNode(n)){nuke(n);continue;}
-                  if(n.querySelectorAll){n.querySelectorAll('*').forEach(function(c){if(isAdNode(c))nuke(c);});}
+                  if(isAdEl(n)){nuke(n);continue;}
+                  if(n.querySelectorAll)n.querySelectorAll('*').forEach(function(c){if(isAdEl(c))nuke(c);});
                 }
-                if(m.type==='attributes'&&isAdNode(m.target))nuke(m.target);
+                if(m.type==='attributes'&&isAdEl(m.target))nuke(m.target);
               }
             }).observe(document.documentElement,{childList:true,subtree:true,
               attributes:true,attributeFilter:['style','class']});
           }catch(_){}
-
-          // Scan inicial
-          try{document.querySelectorAll('*').forEach(function(el){if(isAdNode(el))nuke(el);});}catch(_){}
-          setInterval(function(){killMeta();try{document.querySelectorAll('*').forEach(function(el){if(isAdNode(el))nuke(el);});}catch(_){}},1200);
+          setInterval(function(){
+            killMeta();
+            try{document.querySelectorAll('*').forEach(function(el){if(isAdEl(el))nuke(el);});}catch(_){}
+          },800);
+          try{document.querySelectorAll('*').forEach(function(el){if(isAdEl(el))nuke(el);});}catch(_){}
 
           // CSS de respaldo
           var s=document.createElement('style');
           s.textContent='[style*="2147483647"]{display:none!important;pointer-events:none!important;}'+
-            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],div[class*="popup"],div[class*="overlay"]:not([class*="player"]),div[class*="interstitial"],div[class*="preroll"]{display:none!important;}';
+            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],div[class*="popup"]:not([class*="player"]),'+
+            'div[class*="overlay"]:not([class*="player"]):not([class*="video"]),'+
+            'div[class*="interstitial"],div[class*="preroll"]{display:none!important;}';
           (document.head||document.documentElement).appendChild(s);
         })();
     """.trimIndent()
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FRAME INJECTOR — equivalente a frame-created de Electron
+    // Inyecta en iframes del MISMO ORIGEN vía contentDocument (acceso directo)
+    // Para iframes cross-origin: el try/catch falla silenciosamente
+    // Incluye content-electron.js + iframeShield + voe-ad-cleaner
+    // ═══════════════════════════════════════════════════════════════════════════
+    private fun buildFrameInjectorJs(contentJs: String, voeJs: String): String {
+        val fullPayload = "$bridgeAliasJs\n$touchFixJs\n$iframeShieldJs\n$voeJs\n$contentJs"
+        val payloadJson = JSONObject.quote(fullPayload)
+        return """
+        (function(){
+          if(window.__frameInjector)return; window.__frameInjector=true;
+          var P=$payloadJson;
+          function injectFrame(iframe){
+            try{
+              var win=iframe.contentWindow;
+              var doc=win&&(iframe.contentDocument||win.document);
+              if(!doc||win.__ifs)return;
+              win.__ifs=true;
+              var s=doc.createElement('script');
+              s.textContent=P;
+              (doc.head||doc.documentElement).appendChild(s);
+            }catch(_){} // cross-origin SecurityError: ignorado
+          }
+          function injectAll(){
+            try{document.querySelectorAll('iframe').forEach(function(f){injectFrame(f);});}catch(_){}
+          }
+          injectAll();
+          setInterval(injectAll,800);
+          try{
+            new MutationObserver(function(muts){
+              muts.forEach(function(m){
+                m.addedNodes.forEach(function(n){
+                  if(!n||n.nodeType!==1)return;
+                  if(n.tagName==='IFRAME')injectFrame(n);
+                  else if(n.querySelectorAll)n.querySelectorAll('iframe').forEach(injectFrame);
+                });
+              });
+            }).observe(document.documentElement,{childList:true,subtree:true});
+          }catch(_){}
+        })();
+        """.trimIndent()
+    }
 
     private fun safeCharset(name: String): Charset = try {
         Charset.forName(name)
     } catch (e: Exception) { Charsets.UTF_8 }
 
+    // HTTP injection para iframes cross-origin
     private fun injectIntoIframeResponse(url: String, reqHeaders: Map<String,String>): WebResourceResponse? {
         return try {
             val conn = URL(url).openConnection() as HttpURLConnection
@@ -238,7 +306,8 @@ class MainActivity : AppCompatActivity() {
             reqHeaders["Referer"]?.let        { conn.setRequestProperty("Referer", it) }
             reqHeaders["Accept-Language"]?.let{ conn.setRequestProperty("Accept-Language", it) }
             if (conn.responseCode != 200) return null
-            val ct      = conn.contentType ?: "text/html"
+            val ct = conn.contentType ?: "text/html"
+            if (!ct.contains("html")) return null
             val charset = Regex("charset=([\\w-]+)").find(ct)?.groupValues?.get(1) ?: "utf-8"
             val cs      = safeCharset(charset)
             val html    = conn.inputStream.bufferedReader(cs).readText()
@@ -258,42 +327,39 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { null }
     }
 
-    // ── Inyección temprana: onPageCommitVisible (API 23+) ─────────────────────
-    // Equivale al dom-ready de Electron → antes de que los scripts de la página
-    // terminen de ejecutarse
     private fun earlyInject(url: String) {
         if (isHomePage(url)) { webView.evaluateJavascript(lightCssJs, null); return }
         webView.evaluateJavascript(bridgeAliasJs, null)
         webView.evaluateJavascript(touchFixJs, null)
-        // Inyectar voe-ad-cleaner temprano (MutationObserver activo antes que los ads)
         readAsset("voe-ad-cleaner.js")?.let {
             webView.evaluateJavascript("(function(){$it})();", null)
         }
     }
 
-    // ── Inyección completa: onPageFinished ────────────────────────────────────
     private fun fullInject(url: String) {
         if (isHomePage(url)) { webView.evaluateJavascript(lightCssJs, null); return }
+        val contentJs = readAsset("content-electron.js") ?: return
+        val voeJs     = readAsset("voe-ad-cleaner.js") ?: ""
         webView.evaluateJavascript(bridgeAliasJs, null)
         webView.evaluateJavascript(touchFixJs, null)
-        // content-electron.js ya tiene su propio IIFE, no necesita wrapper
-        readAsset("content-electron.js")?.let {
-            webView.evaluateJavascript(it, null)
-        }
-        readAsset("voe-ad-cleaner.js")?.let {
-            webView.evaluateJavascript("(function(){if(window.__adshieldVoe)return;window.__adshieldVoe=true;$it})();", null)
-        }
+        // content-electron.js directo (ya tiene su propio IIFE)
+        webView.evaluateJavascript(contentJs, null)
+        // voe-ad-cleaner con guard
+        webView.evaluateJavascript(
+            "(function(){if(window.__adshieldVoe)return;window.__adshieldVoe=true;$voeJs})();",null)
+        // Frame injector: replica frame-created de Electron para iframes same-origin
+        webView.evaluateJavascript(buildFrameInjectorJs(contentJs, voeJs), null)
     }
 
-    // ── Red de seguridad cada 3s ──────────────────────────────────────────────
     private val reInjectRunnable = object : Runnable {
         override fun run() {
             val url = try { webView.url ?: "" } catch (e: Exception) { "" }
             if (!isHomePage(url)) {
                 webView.evaluateJavascript(bridgeAliasJs, null)
-                readAsset("voe-ad-cleaner.js")?.let {
+                val voe = readAsset("voe-ad-cleaner.js")
+                voe?.let {
                     webView.evaluateJavascript(
-                        "(function(){if(!window.__adshieldVoeR){window.__adshieldVoeR=true;$it}})()", null)
+                        "(function(){if(!window.__adshieldVoeR){window.__adshieldVoeR=true;$it}})()",null)
                 }
             }
             handler.postDelayed(this, 3000)
@@ -330,20 +396,16 @@ class MainActivity : AppCompatActivity() {
 
         webView.webViewClient = object : WebViewClient() {
 
-            // CAPA 3a: Bridge lo antes posible
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (!isHomePage(url)) view.evaluateJavascript(bridgeAliasJs, null)
             }
 
-            // CAPA 3b: Equivalente a dom-ready de Electron (API 23+)
-            // Inyecta scripts ANTES de que la página termine de cargar
             override fun onPageCommitVisible(view: WebView, url: String) {
                 super.onPageCommitVisible(view, url)
                 earlyInject(url)
             }
 
-            // CAPA 1: Bloqueo de red
             override fun shouldInterceptRequest(
                 view: WebView, request: WebResourceRequest
             ): WebResourceResponse? {
@@ -364,23 +426,41 @@ class MainActivity : AppCompatActivity() {
                     return WebResourceResponse("text/plain","utf-8",
                         ByteArrayInputStream(ByteArray(0)))
                 }
-                // CAPA 4: Inyección en iframes HTML
+                // HTTP injection para iframes HTML
                 if (!request.isForMainFrame &&
-                    accept.contains("text/html") &&
-                    url.startsWith("https") &&
-                    !isHomePage(url)) {
+                    (accept.contains("text/html") || accept.contains("*/*") || accept.isEmpty()) &&
+                    url.startsWith("https") && !isHomePage(url)) {
                     val injected = injectIntoIframeResponse(url, request.requestHeaders)
                     if (injected != null) return injected
                 }
                 return super.shouldInterceptRequest(view, request)
             }
 
-            // CAPA 2: Bloquear navegación a URLs de ads
+            // CASO 3: Bloquear redirecciones que parecen ads
             override fun shouldOverrideUrlLoading(
                 view: WebView, request: WebResourceRequest
-            ): Boolean = isAdUrl(request.url.toString())
+            ): Boolean {
+                val url         = request.url.toString()
+                val currentUrl  = view.url ?: ""
+                val currentHost = try { Uri.parse(currentUrl).host ?: "" } catch (e: Exception) { "" }
+                val targetHost  = request.url.host ?: ""
 
-            // CAPA 5: Inyección completa al terminar la carga
+                if (isAdUrl(url)) { blockedCount++; return true }
+
+                // Si estamos en un sitio de streaming y la navegación va a
+                // un dominio completamente distinto con patrón de redirect de ad → bloquear
+                if (!isHomePage(currentUrl) && currentHost.isNotEmpty() &&
+                    targetHost.isNotEmpty() && currentHost != targetHost &&
+                    !targetHost.contains(currentHost.takeLast(15)) &&
+                    !currentHost.contains(targetHost.takeLast(15))) {
+                    val l = url.lowercase()
+                    if (adRedirectKeywords.any { l.contains(it) }) {
+                        blockedCount++; return true
+                    }
+                }
+                return false
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
                 fullInject(url)
@@ -394,7 +474,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // CAPA 2: Bloquear popups de cualquier frame
         webView.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean,
