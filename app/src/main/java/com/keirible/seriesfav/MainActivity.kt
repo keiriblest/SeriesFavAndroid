@@ -33,58 +33,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val antiPopupCss = """
-        div[class*="pop-up"], div[class*="popup"], div[id*="popup"],
-        div[class*="overlay"][style*="z-index"],
-        div[class*="ad-layer"], div[class*="ad-overlay"],
-        div[class*="interstitial"], div[class*="advertisement"],
-        .voe-blocker, #voe-blocker, div[class*="voe-ad"],
-        iframe[src*="ads."], iframe[src*="pop."], iframe[src*="track."],
-        [style*="2147483647"] {
-          display: none !important; visibility: hidden !important;
-          pointer-events: none !important; opacity: 0 !important;
-          height: 0 !important; width: 0 !important;
-        }
-    """.trimIndent()
-
-    private fun buildCssInjectJs(css: String) = """
+    private val injectCssJs = """
         (function(){
-          if(document.__adshieldCss) return; document.__adshieldCss = true;
+          if(document.__adshieldCss) return;
+          document.__adshieldCss = true;
           var s = document.createElement('style');
-          s.textContent = ${org.json.JSONObject.quote("CSS_PLACEHOLDER")};
+          s.textContent = 'div[class*="popup"],div[id*="popup"],.voe-blocker,#voe-blocker,div[class*="voe-ad"],iframe[src*="ads."],iframe[src*="pop."],[style*="2147483647"]{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;width:0!important}';
           (document.head || document.documentElement).appendChild(s);
         })();
-    """.trimIndent().replace(""CSS_PLACEHOLDER"", org.json.JSONObject.quote(
-        """
-        div[class*="pop-up"], div[class*="popup"], div[id*="popup"],
-        .voe-blocker, #voe-blocker, div[class*="voe-ad"],
-        iframe[src*="ads."], iframe[src*="pop."], iframe[src*="track."],
-        [style*="2147483647"] {
-          display: none !important; visibility: hidden !important;
-          pointer-events: none !important; opacity: 0 !important;
-        }
-        """.trimIndent()
-    ))
+    """.trimIndent()
 
     private fun inject() {
         val contentJs = readAsset("content-electron.js")
         val voeJs = readAsset("voe-ad-cleaner.js")
         val guard = "if(window.__adshieldInjected) return; window.__adshieldInjected = true;"
-        val cssJs = buildCssInjectJs(antiPopupCss)
 
-        webView.evaluateJavascript(cssJs, null)
-        contentJs?.let { webView.evaluateJavascript("(function(){$guard$it})();", null) }
-        voeJs?.let { webView.evaluateJavascript("(function(){$guard$it})();", null) }
+        webView.evaluateJavascript(injectCssJs, null)
+        contentJs?.let { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
+        voeJs?.let { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
     }
 
     private val reInjectRunnable = object : Runnable {
         override fun run() {
-            val voeJs = readAsset("voe-ad-cleaner.js") ?: run {
-                handler.postDelayed(this, 4000); return
+            val voeJs = readAsset("voe-ad-cleaner.js")
+            if (voeJs != null) {
+                webView.evaluateJavascript(
+                    "(function(){ if(!window.__adshieldVoeActive){ window.__adshieldVoeActive=true; ${voeJs} } })()", null
+                )
             }
-            webView.evaluateJavascript(
-                "(function(){ if(!window.__adshieldVoeActive){ window.__adshieldVoeActive=true; $voeJs } })()", null
-            )
             handler.postDelayed(this, 4000)
         }
     }
