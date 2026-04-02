@@ -10,18 +10,14 @@ import androidx.appcompat.app.AppCompatActivity
 import com.keirible.seriesfav.R
 import org.json.JSONArray
 import java.io.ByteArrayInputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.nio.charset.Charset
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
-    private var blockedCount = 0
-    private val handler = Handler(Looper.getMainLooper())
-    private val APP_URL  = "https://keiriblest.github.io/SeriesFav/mobile.html"
-    // Dominio principal — aquí NO se inyectan scripts agresivos
-    private val HOME_HOST = "keiriblest.github.io"
+    private var blockedCount  = 0
+    private val handler       = Handler(Looper.getMainLooper())
+    private val APP_URL       = "https://keiriblest.github.io/SeriesFav/mobile.html"
+    private val HOME_HOST     = "keiriblest.github.io"
     private var adPatterns: List<String> = emptyList()
 
     private fun readAsset(name: String): String? = try {
@@ -40,11 +36,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun isAdUrl(url: String)  = adPatterns.any { url.contains(it) }
+    private fun isAdUrl(url: String)    = adPatterns.any { url.contains(it) }
     private fun isHomePage(url: String) = url.contains(HOME_HOST)
 
-    // ── Scripts ────────────────────────────────────────────────────────────────
-
+    // ── Bridge ────────────────────────────────────────────────────────────────
     private val bridgeAliasJs = """
         (function(){
           if(window.__adshieldBridge) return; window.__adshieldBridge=true;
@@ -57,22 +52,7 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // Touch fix: SOLO en páginas de streaming, nunca en la página principal
-    private val touchFixJs = """
-        (function(){
-          if(window.__adshieldTouchFix) return; window.__adshieldTouchFix=true;
-          document.addEventListener('touchstart',function(e){
-            try{
-              var t=e.touches[0]; if(!t) return;
-              var fake=new MouseEvent('mousedown',{bubbles:true,cancelable:true,
-                clientX:t.clientX,clientY:t.clientY});
-              e.target.dispatchEvent(fake);
-            }catch(_){}
-          },{passive:true,capture:true});
-        })();
-    """.trimIndent()
-
-    // CSS: versión suave para la página principal (solo oculta elementos claramente ads)
+    // ── CSS página principal (mínimo, no invasivo) ────────────────────────────
     private val lightCssJs = """
         (function(){
           if(document.__adshieldCssLight) return; document.__adshieldCssLight=true;
@@ -86,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // CSS completo: solo en páginas de streaming
+    // ── CSS streaming completo ────────────────────────────────────────────────
     private val fullCssJs = """
         (function(){
           if(document.__adshieldCssContent) return; document.__adshieldCssContent=true;
@@ -111,154 +91,50 @@ class MainActivity : AppCompatActivity() {
         })();
     """.trimIndent()
 
-    // iframeShield: SOLO se inyecta dentro de iframes, nunca en el frame principal
-    private val iframeShieldJs = """
+    // ── Touch fix (solo streaming) ────────────────────────────────────────────
+    private val touchFixJs = """
         (function(){
-          'use strict';
-          if(window.__iframeShield) return; window.__iframeShield=true;
-
-          // Bloquear window.open
-          window.open=function(url){
-            return{closed:false,close:function(){},focus:function(){},blur:function(){},
-                   postMessage:function(){},location:{href:'about:blank',
-                   assign:function(){},replace:function(){}}};
-          };
-
-          // Evitar que el iframe navegue el frame padre
-          try{
-            Object.defineProperty(window,'top',   {get:function(){return window;},configurable:true});
-            Object.defineProperty(window,'parent',{get:function(){return window;},configurable:true});
-          }catch(_){}
-
-          // Bloquear location.assign/replace hacia dominios externos
-          try{
-            var _loc=window.location;
-            ['assign','replace'].forEach(function(m){
-              var orig=_loc[m].bind(_loc);
-              _loc[m]=function(url){
-                if(typeof url==='string'&&(url.startsWith('http')||url.startsWith('//'))
-                   &&url.indexOf(window.location.hostname)===-1){return;}
-                orig(url);
-              };
-            });
-          }catch(_){}
-
-          // Bloquear links <a> externos
-          document.addEventListener('click',function(e){
-            var el=e.target;
-            for(var i=0;i<6&&el&&el!==document.body;i++){
-              if(el.tagName==='A'){
-                var href=el.getAttribute('href')||'';
-                if(href&&!href.startsWith('#')&&!href.startsWith('javascript')
-                   &&href.indexOf(window.location.hostname)===-1
-                   &&(href.startsWith('http')||href.startsWith('//'))){
-                  e.preventDefault();e.stopImmediatePropagation();return;
-                }
-              }
-              el=el.parentElement;
-            }
-          },true);
-
-          // Eliminar overlays de ads dentro del iframe
-          var SAFE=['player','jw','video','content','container','wrapper'];
-          function nukeOverlays(){
+          if(window.__adshieldTouchFix) return; window.__adshieldTouchFix=true;
+          document.addEventListener('touchstart',function(e){
             try{
-              document.querySelectorAll('[style*="2147483647"],[style*="position:fixed"],[style*="position: fixed"]')
-              .forEach(function(el){
-                var tag=el.tagName.toLowerCase();
-                if(['video','audio','canvas','iframe'].indexOf(tag)!==-1) return;
-                var cls=(typeof el.className==='string'?el.className:'').toLowerCase();
-                var id=(el.id||'').toLowerCase();
-                if(SAFE.some(function(w){return cls.indexOf(w)!==-1||id.indexOf(w)!==-1;})) return;
-                el.style.cssText+=';display:none!important;pointer-events:none!important;';
-              });
+              var t=e.touches[0]; if(!t) return;
+              var fake=new MouseEvent('mousedown',{bubbles:true,cancelable:true,
+                clientX:t.clientX,clientY:t.clientY});
+              e.target.dispatchEvent(fake);
             }catch(_){}
-          }
-
-          try{
-            new MutationObserver(function(muts){
-              muts.forEach(function(m){
-                m.addedNodes.forEach(function(n){if(n.nodeType===1)nukeOverlays();});
-                if(m.type==='attributes')nukeOverlays();
-              });
-            }).observe(document.documentElement,
-              {childList:true,subtree:true,attributes:true,attributeFilter:['style','class']});
-          }catch(_){}
-
-          setInterval(nukeOverlays,800);
-          if(document.readyState==='loading'){
-            document.addEventListener('DOMContentLoaded',nukeOverlays);
-          }else{nukeOverlays();}
+          },{passive:true,capture:true});
         })();
     """.trimIndent()
 
-    private fun buildIframeInjection(): String {
-        val voe        = readAsset("voe-ad-cleaner.js") ?: ""
-        val shieldSafe = iframeShieldJs.replace("</script>","<\\/script>")
-        val bridgeSafe = bridgeAliasJs.replace("</script>","<\\/script>")
-        val voeSafe    = voe.replace("</script>","<\\/script>")
-        return "<script>$bridgeSafe\n$shieldSafe\n$voeSafe</script>"
-    }
-
-    private fun safeCharset(name: String): Charset = try {
-        Charset.forName(name)
-    } catch (e: Exception) { Charsets.UTF_8 }
-
-    private fun injectIntoIframeResponse(url: String, reqHeaders: Map<String, String>): WebResourceResponse? {
-        return try {
-            val conn = URL(url).openConnection() as HttpURLConnection
-            conn.connectTimeout = 5000; conn.readTimeout = 8000
-            conn.instanceFollowRedirects = true
-            reqHeaders.forEach { (k,v) ->
-                if (!k.equals("Range",ignoreCase=true)) conn.setRequestProperty(k,v)
-            }
-            if (conn.responseCode != 200) return null
-            val ct      = conn.contentType ?: "text/html"
-            val charset = Regex("charset=([\\w-]+)").find(ct)?.groupValues?.get(1) ?: "utf-8"
-            val cs      = safeCharset(charset)
-            var html    = conn.inputStream.bufferedReader(cs).readText()
-            val inject  = buildIframeInjection()
-            html = when {
-                html.contains("<head>",ignoreCase=true) ->
-                    html.replaceFirst(Regex("(?i)<head>"),"<head>$inject")
-                html.contains("<html>",ignoreCase=true) ->
-                    html.replaceFirst(Regex("(?i)<html>"),"<html>$inject")
-                else -> "$inject$html"
-            }
-            WebResourceResponse("text/html", charset, ByteArrayInputStream(html.toByteArray(cs)))
-        } catch (e: Exception) { null }
-    }
-
-    // Inyección según si estamos en la página principal o en un sitio de streaming
+    // ── Inyección según página ────────────────────────────────────────────────
     private fun injectForPage(url: String) {
         if (isHomePage(url)) {
-            // Página principal: SOLO CSS suave, sin tocar window.open ni eventos
             webView.evaluateJavascript(lightCssJs, null)
         } else {
-            // Sitio de streaming: todo el arsenal
             webView.evaluateJavascript(bridgeAliasJs, null)
             webView.evaluateJavascript(touchFixJs, null)
             webView.evaluateJavascript(fullCssJs, null)
             readAsset("content-electron.js")?.let {
                 webView.evaluateJavascript(
-                    "(function(){if(window.__adshieldContent)return;window.__adshieldContent=true;$it})();",null)
+                    "(function(){if(window.__adshieldContent)return;window.__adshieldContent=true;$it})();", null)
             }
             readAsset("voe-ad-cleaner.js")?.let {
                 webView.evaluateJavascript(
-                    "(function(){if(window.__adshieldVoe)return;window.__adshieldVoe=true;$it})();",null)
+                    "(function(){if(window.__adshieldVoe)return;window.__adshieldVoe=true;$it})();", null)
             }
         }
     }
 
+    // ── Re-inyección cada 3s solo en streaming ────────────────────────────────
     private val reInjectRunnable = object : Runnable {
         override fun run() {
-            val currentUrl = try { webView.url ?: "" } catch (e: Exception) { "" }
-            if (!isHomePage(currentUrl)) {
+            val url = try { webView.url ?: "" } catch (e: Exception) { "" }
+            if (!isHomePage(url)) {
                 webView.evaluateJavascript(bridgeAliasJs, null)
                 webView.evaluateJavascript(fullCssJs, null)
                 readAsset("voe-ad-cleaner.js")?.let {
                     webView.evaluateJavascript(
-                        "(function(){if(!window.__adshieldVoeR){window.__adshieldVoeR=true;$it}})()",null)
+                        "(function(){if(!window.__adshieldVoeR){window.__adshieldVoeR=true;$it}})()", null)
                 }
             }
             handler.postDelayed(this, 3000)
@@ -267,7 +143,7 @@ class MainActivity : AppCompatActivity() {
 
     inner class AdShieldBridge {
         @JavascriptInterface fun getCount(): Int = blockedCount
-        @JavascriptInterface fun resetCount(): Int { blockedCount=0; return 0 }
+        @JavascriptInterface fun resetCount(): Int { blockedCount = 0; return 0 }
         @JavascriptInterface fun contentBlocked() { blockedCount++ }
     }
 
@@ -297,7 +173,6 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                // Bridge solo en páginas de streaming (no en la principal)
                 if (!isHomePage(url)) view.evaluateJavascript(bridgeAliasJs, null)
             }
 
@@ -307,25 +182,34 @@ class MainActivity : AppCompatActivity() {
                 val url    = request.url.toString()
                 val accept = request.requestHeaders["Accept"] ?: ""
 
+                // Bloquear recursos de ads (scripts, imágenes, etc.)
                 if (isAdUrl(url)) {
                     blockedCount++
-                    return WebResourceResponse("text/plain","utf-8",ByteArrayInputStream(ByteArray(0)))
+                    return WebResourceResponse("text/plain","utf-8",
+                        ByteArrayInputStream(ByteArray(0)))
                 }
-                if (url.startsWith("data:application/pdf")||
+
+                // Bloquear PDF popunder trick
+                if (url.startsWith("data:application/pdf") ||
                     url.startsWith("data:application/octet")) {
-                    return WebResourceResponse("text/plain","utf-8",ByteArrayInputStream(ByteArray(0)))
+                    return WebResourceResponse("text/plain","utf-8",
+                        ByteArrayInputStream(ByteArray(0)))
                 }
-                // Inyectar iframeShield solo en iframes de sitios de streaming
-                if (!request.isForMainFrame &&
-                    accept.contains("text/html") &&
-                    url.startsWith("http") &&
-                    !isAdUrl(url)) {
-                    val injected = injectIntoIframeResponse(url, request.requestHeaders)
-                    if (injected != null) return injected
+
+                // Bloquar iframes de ads puros (los que su URL ya es un dominio de ad)
+                if (!request.isForMainFrame && accept.contains("text/html")) {
+                    val host = request.url.host ?: ""
+                    if (adPatterns.any { host.contains(it) }) {
+                        blockedCount++
+                        return WebResourceResponse("text/html","utf-8",
+                            ByteArrayInputStream("<html><body></body></html>".toByteArray()))
+                    }
                 }
+
                 return super.shouldInterceptRequest(view, request)
             }
 
+            // Solo bloquear navegación si la URL es claramente un ad
             override fun shouldOverrideUrlLoading(
                 view: WebView, request: WebResourceRequest
             ): Boolean = isAdUrl(request.url.toString())
@@ -343,6 +227,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Bloquear TODOS los popups de cualquier frame
         webView.webChromeClient = object : WebChromeClient() {
             override fun onCreateWindow(
                 view: WebView, isDialog: Boolean,
