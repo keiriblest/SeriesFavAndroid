@@ -15,7 +15,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var blockedCount = 0
     private val handler = Handler(Looper.getMainLooper())
-    private val APP_URL = "https://keiriblest.github.io/SeriesFav/desktop.html"
+    private val APP_URL = "https://keiriblest.github.io/SeriesFav/mobile.html"
 
     private fun readAsset(name: String): String? = try {
         assets.open("adshield/$name").bufferedReader().readText()
@@ -33,30 +33,60 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Alias: conecta window.adshieldElectron (usado en los scripts)
+    // con window.AdShield (el bridge Java registrado en el WebView)
+    private val bridgeAliasJs = """
+        (function(){
+          if(window.adshieldElectron) return;
+          window.adshieldElectron = {
+            reportBlocked: function() {
+              try { window.AdShield && window.AdShield.contentBlocked(); } catch(_) {}
+            }
+          };
+        })();
+    """.trimIndent()
+
     private val injectCssJs = """
         (function(){
           if(document.__adshieldCss) return;
           document.__adshieldCss = true;
+          var css = [
+            'div[style*="position:fixed"][style*="2147483647"]',
+            'div[style*="position: fixed"][style*="2147483647"]',
+            'div[class*="pop-up"],div[class*="popup"],div[id*="popup"]',
+            'div[id*="overlay-ad"],div[class*="ad-overlay"],div[class*="ad-layer"]',
+            'div[class*="preroll"],div[class*="pre-roll"],div[class*="interstitial"]',
+            '.voe-blocker,#voe-blocker,div[class*="voe-ad"],div[id*="voe-ad"]',
+            '.jw-overlays > div:not([class*="jw-"])',
+            'iframe[src*="ads."],iframe[src*="pop."],iframe[src*="track."]',
+            'iframe[src*="click."],iframe[id*="ad"],iframe[class*="ad"]',
+            '[style*="2147483647"]'
+          ].join(',') + '{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;width:0!important}';
           var s = document.createElement('style');
-          s.textContent = 'div[class*="popup"],div[id*="popup"],.voe-blocker,#voe-blocker,div[class*="voe-ad"],iframe[src*="ads."],iframe[src*="pop."],[style*="2147483647"]{display:none!important;visibility:hidden!important;pointer-events:none!important;opacity:0!important;height:0!important;width:0!important}';
+          s.textContent = css;
           (document.head || document.documentElement).appendChild(s);
         })();
     """.trimIndent()
 
     private fun inject() {
         val contentJs = readAsset("content-electron.js")
-        val voeJs = readAsset("voe-ad-cleaner.js")
-        val guard = "if(window.__adshieldInjected) return; window.__adshieldInjected = true;"
+        val voeJs     = readAsset("voe-ad-cleaner.js")
+        val guard     = "if(window.__adshieldInjected) return; window.__adshieldInjected = true;"
 
+        // 1. Alias bridge primero
+        webView.evaluateJavascript(bridgeAliasJs, null)
+        // 2. CSS anti-popups
         webView.evaluateJavascript(injectCssJs, null)
+        // 3. Scripts de bloqueo
         contentJs?.let { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
-        voeJs?.let { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
+        voeJs?.let     { webView.evaluateJavascript("(function(){${guard}${it}})();", null) }
     }
 
     private val reInjectRunnable = object : Runnable {
         override fun run() {
             val voeJs = readAsset("voe-ad-cleaner.js")
             if (voeJs != null) {
+                webView.evaluateJavascript(bridgeAliasJs, null)
                 webView.evaluateJavascript(
                     "(function(){ if(!window.__adshieldVoeActive){ window.__adshieldVoeActive=true; ${voeJs} } })()", null
                 )
@@ -78,10 +108,13 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
 
         webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            allowFileAccess = false
-            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            javaScriptEnabled      = true
+            domStorageEnabled      = true
+            allowFileAccess        = false
+            mediaPlaybackRequiresUserGesture = false
+            mixedContentMode       = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+            useWideViewPort        = true
+            loadWithOverviewMode   = true
         }
 
         WebView.setWebContentsDebuggingEnabled(true)
